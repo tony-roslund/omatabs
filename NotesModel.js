@@ -1,3 +1,14 @@
+function maxTitleChars() {
+  return 24
+}
+
+function clampTitle(title) {
+  var t = String(title == null ? "" : title)
+  var max = maxTitleChars()
+  if (t.length > max) t = t.slice(0, max)
+  return t
+}
+
 function emptyState() {
   return { version: 1, edge: "right", seeded: false, notes: [] }
 }
@@ -54,7 +65,7 @@ function normalizeNote(value) {
   if (!value || typeof value !== "object") return null
   var id = String(value.id || "").trim()
   if (!id) return null
-  var title = String(value.title == null ? "" : value.title)
+  var title = clampTitle(value.title)
   var body = String(value.body == null ? "" : value.body)
   var created = Number(value.created)
   var updated = Number(value.updated)
@@ -111,7 +122,7 @@ function newNote(title, body, colorId) {
   var now = Date.now()
   return {
     id: newId(),
-    title: String(title || ""),
+    title: clampTitle(title),
     body: String(body || ""),
     color: colorFor(colorId).id,
     created: now,
@@ -121,10 +132,10 @@ function newNote(title, body, colorId) {
 
 function displayTitle(note) {
   if (!note) return "Untitled"
-  var title = String(note.title || "").replace(/\s+/g, " ").trim()
+  var title = clampTitle(String(note.title || "").replace(/\s+/g, " ").trim())
   if (title) return title
   var body = String(note.body || "").replace(/\s+/g, " ").trim()
-  if (body) return body.slice(0, 40)
+  if (body) return clampTitle(body)
   return "Untitled"
 }
 
@@ -135,8 +146,20 @@ function markdownForDisplay(body) {
 }
 
 function tabHeightForTitle(title, fontPx, padding, minH, maxH) {
-  var t = String(title || "Untitled")
+  var t = clampTitle(title || "Untitled")
   var h = Math.round(t.length * fontPx * 0.62 + padding * 2)
+  if (h < minH) h = minH
+  if (h > maxH) h = maxH
+  return h
+}
+
+function tabHeightForNote(note, fontPx, padding, minH, maxH) {
+  var titleH = tabHeightForTitle(displayTitle(note), fontPx, padding, minH, maxH)
+  var body = note && note.body != null ? String(note.body) : ""
+  var rawLines = body.length ? body.split("\n").length : 0
+  var wrapLines = Math.max(rawLines, Math.ceil(body.length / 36))
+  var needed = padding + fontPx + 6 + wrapLines * (fontPx + 4) + 28 + padding
+  var h = Math.max(titleH, needed)
   if (h < minH) h = minH
   if (h > maxH) h = maxH
   return h
@@ -164,7 +187,7 @@ function packTabs(notes, available, opts) {
   var n = Array.isArray(notes) ? notes.length : 0
   var heights = []
   for (var i = 0; i < n; i++)
-    heights.push(tabHeightForTitle(displayTitle(notes[i]), fontPx, pad, minH, maxH))
+    heights.push(tabHeightForNote(notes[i], fontPx, pad, minH, maxH))
 
   function layout(ov) {
     var items = []

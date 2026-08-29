@@ -23,6 +23,18 @@ assert(seeded.notes[0].body.indexOf("Hover") !== -1, "seed note has instructions
 assert(seeded.notes[0].body.indexOf("**bold**") !== -1, "seed note mentions markdown")
 assert(ctx.markdownForDisplay("a\nb") === "a  \nb", "single newlines become hard breaks")
 assert(ctx.markdownForDisplay("a\n\nb") === "a\n\nb", "blank lines stay paragraph breaks")
+assert(ctx.maxTitleChars() === 24, "title cap is 24 characters")
+assert(ctx.clampTitle("x".repeat(40)).length === 24, "clampTitle cuts at the cap")
+assert(ctx.newNote("x".repeat(40), "body").title.length === 24, "new notes clamp titles")
+assert(ctx.displayTitle({ title: "x".repeat(40), body: "" }).length === 24, "display titles stay capped")
+
+const shortNote = ctx.newNote("Hi", "one")
+const longBody = ctx.newNote("Hi", Array(20).fill("a line of peek text").join("\n"))
+const shortH = ctx.tabHeightForNote(shortNote, 12, 12, 72, 160)
+const longH = ctx.tabHeightForNote(longBody, 12, 12, 72, 160)
+assert(shortH <= 160 && longH <= 160, "tab height never exceeds max")
+assert(longH >= shortH, "longer bodies grow the tab up to the max")
+assert(ctx.tabHeightForTitle("x".repeat(40), 12, 12, 72, 160) <= 160, "long titles stop at max height")
 
 const note = ctx.newNote("Groceries", "milk\neggs")
 assert(!!note.id && note.title === "Groceries", "new note")

@@ -54,6 +54,7 @@ BorderSurface {
     anchors.rightMargin: root.contentRightInset + (root.onRight ? root.hang : 0)
     foreground: root.ink
     placeholderText: "Title"
+    maximumLength: NotesModel.maxTitleChars()
     font.bold: true
     font.pixelSize: Style.font.title
     background: Item {}

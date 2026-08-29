@@ -181,7 +181,7 @@ Item {
       fontPx: Style.font.body,
       padding: Style.space(12),
       minHeight: Style.space(120),
-      maxHeight: Style.space(180),
+      maxHeight: Style.space(240),
       bottomOffset: Style.space(100)
     })
   }

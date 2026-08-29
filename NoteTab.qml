@@ -119,24 +119,44 @@ Item {
       font.bold: true
       elide: Text.ElideRight
       wrapMode: Text.NoWrap
+
+      TapHandler {
+        enabled: !root.editing
+        onTapped: root.clicked()
+      }
     }
 
-    Text {
-      id: peekBodyText
+    Flickable {
+      id: peekScroll
       anchors.top: peekTitle.bottom
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.bottom: chrome.top
       anchors.topMargin: Style.spacing.xs
       anchors.bottomMargin: Style.spacing.xs
-      text: NotesModel.markdownForDisplay(root.body)
-      textFormat: Text.MarkdownText
-      color: Util.alpha(root.ink, 0.82)
-      linkColor: root.ink
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-      wrapMode: Text.Wrap
       clip: true
+      boundsBehavior: Flickable.StopAtBounds
+      flickableDirection: Flickable.VerticalFlick
+      interactive: contentHeight > height
+      contentWidth: width
+      contentHeight: peekBodyText.implicitHeight
+
+      Text {
+        id: peekBodyText
+        width: peekScroll.width
+        text: NotesModel.markdownForDisplay(root.body)
+        textFormat: Text.MarkdownText
+        color: Util.alpha(root.ink, 0.82)
+        linkColor: root.ink
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.Wrap
+      }
+
+      TapHandler {
+        enabled: !root.editing
+        onTapped: root.clicked()
+      }
     }
 
     NoteChrome {
@@ -158,8 +178,7 @@ Item {
   }
 
   MouseArea {
-    anchors.fill: parent
-    anchors.bottomMargin: root.hovered ? Style.space(28) : 0
+    anchors.fill: spine
     enabled: !root.editing
     cursorShape: Qt.PointingHandCursor
     onClicked: root.clicked()
