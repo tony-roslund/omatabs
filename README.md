@@ -34,3 +34,15 @@ New note from a keybind:
 ```lua
 o.bind("SUPER + N", "New Omatabs note", [[omarchy-shell shell toggle tony.omatabs '{}']])
 ```
+
+## Remove
+
+```bash
+omarchy plugin remove tony.omatabs
+```
+
+That disables the overlay and deletes the plugin checkout. Notes are left in `~/.local/state/omarchy/omatabs.json`; delete that file if you also want the saved tabs gone.
+
+## License
+
+MIT. No extra packages or privileged install steps.
