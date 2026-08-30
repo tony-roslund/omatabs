@@ -23,6 +23,7 @@ Item {
   property string draftBody: ""
   property string draftColor: "yellow"
   property string hoveredId: ""
+  property int hoveredIndex: -1
   property bool plusHovered: false
 
   readonly property bool onRight: root.edge !== "left"
@@ -32,7 +33,15 @@ Item {
   readonly property int cardHeight: Style.space(280)
   readonly property int plusHeight: Style.space(20)
   readonly property int hang: Math.max(Style.cornerRadius, 4) + Math.max(2, Style.space(2))
-  readonly property int dockWidth: root.hoveredId !== "" ? root.peekWidth : root.spineWidth
+  readonly property int maxPeekWidth: {
+    var sw = (strip.screen && strip.screen.width > 0) ? strip.screen.width : 1600
+    return Math.max(root.cardWidth, Math.min(Style.space(640), Math.round(sw * 0.45)))
+  }
+  readonly property var hoveredTabItem: {
+    if (root.hoveredIndex < 0) return stack
+    var tab = tabRepeater.itemAt(root.hoveredIndex)
+    return tab ? tab : stack
+  }
   readonly property color paper: Color.menu.background
   readonly property color ink: Color.menu.text
   readonly property var paperBorder: Border.flat(Color.menu.border, Math.max(1, Style.space(1)))
@@ -58,6 +67,7 @@ Item {
     root.draftBody = ""
     root.draftColor = NotesModel.nextColor(root.notes)
     root.hoveredId = ""
+    root.hoveredIndex = -1
     root.plusHovered = false
     root.editorOpen = true
     Qt.callLater(function() {
@@ -75,6 +85,7 @@ Item {
     root.draftBody = note.body
     root.draftColor = note.color
     root.hoveredId = ""
+    root.hoveredIndex = -1
     root.plusHovered = false
     root.editorOpen = true
     Qt.callLater(function() {
@@ -173,16 +184,41 @@ Item {
     root.notesRev = root.notesRev + 1
   }
 
+  Text {
+    id: titleMeter
+    visible: false
+    font.family: Style.font.menuFamily
+    font.pixelSize: Style.font.body
+    font.bold: true
+    wrapMode: Text.NoWrap
+  }
+
+  function titleTabHeights() {
+    var out = []
+    // Spine has aaPad on each end, plus room so the rotated title is not tight.
+    var pad = Style.space(24) + 4
+    var minH = Style.space(32)
+    var list = root.notes || []
+    for (var i = 0; i < list.length; i++) {
+      titleMeter.text = NotesModel.displayTitle(list[i])
+      out.push(Math.max(minH, Math.ceil(titleMeter.implicitWidth) + pad))
+    }
+    return out
+  }
+
   function layoutFor(available) {
+    var inner = Math.max(Style.space(32), Number(available) || 0)
     return NotesModel.packTabs(root.notes, available, {
       plusHeight: root.plusHeight,
-      overlap: Style.space(10),
-      minStep: Style.space(18),
+      overlap: Style.space(8),
+      minStep: Style.space(16),
       fontPx: Style.font.body,
-      padding: Style.space(12),
-      minHeight: Style.space(120),
-      maxHeight: Style.space(240),
-      bottomOffset: Style.space(100)
+      padding: Style.space(8),
+      minHeight: Style.space(32),
+      maxHeight: inner,
+      bottomOffset: Style.space(100),
+      titleOnly: true,
+      heights: root.titleTabHeights()
     })
   }
 
@@ -229,8 +265,9 @@ Item {
     id: strip
     visible: true
     color: "transparent"
-    // Keep the Wayland surface at card size so hover never resizes the layer.
-    implicitWidth: root.cardWidth
+    // Wide enough for a content-sized peek. Input is masked to the spines
+    // (or the open note), so this does not steal the rest of the screen.
+    implicitWidth: root.maxPeekWidth + root.hang
     exclusiveZone: 0
     exclusionMode: ExclusionMode.Ignore
     surfaceFormat.opaque: false
@@ -243,7 +280,7 @@ Item {
       right: root.onRight
       left: !root.onRight
     }
-    mask: Region { item: stack }
+    mask: Region { item: root.hoveredTabItem }
 
     Item {
       id: stack
@@ -253,16 +290,12 @@ Item {
       anchors.left: root.onRight ? undefined : parent.left
       anchors.topMargin: Style.gapsOut + Style.space(28)
       anchors.bottomMargin: Style.gapsOut
-      width: root.dockWidth
-      Behavior on width {
-        NumberAnimation {
-          duration: root.hoveredId !== "" ? 120 : 80
-          easing.type: Easing.OutCubic
-        }
-      }
+      width: root.spineWidth
 
       readonly property var pack: {
         var _rev = root.notesRev
+        var _px = titleMeter.font.pixelSize
+        var _w = titleMeter.implicitWidth
         return root.layoutFor(height)
       }
 
@@ -303,6 +336,7 @@ Item {
       }
 
       Repeater {
+        id: tabRepeater
         model: root.notesRev >= 0 ? root.notes.length : 0
         delegate: NoteTab {
           required property int index
@@ -316,9 +350,10 @@ Item {
             return (items && items[index]) ? items[index] : { y: 0, height: Style.space(72) }
           }
           readonly property string noteId: note ? note.id : ""
-          y: slot.y
-          height: slot.height
-          z: index
+          slotY: slot.y
+          slotHeight: slot.height
+          stackHeight: stack.height
+          z: hovered ? 2000 + index : index
           tilt: {
             var tilts = [2.4, 1.8, 2.8, 2.1, 1.6, 2.6]
             return tilts[index % tilts.length]
@@ -336,6 +371,7 @@ Item {
           colorId: note && note.color ? note.color : "yellow"
           spineWidth: root.spineWidth
           peekWidth: root.peekWidth
+          maxPeekWidth: root.maxPeekWidth
           onClicked: if (noteId) root.editNote(noteId)
           onColorPicked: function(id) { if (noteId) root.setNoteColor(noteId, id) }
           onDeleteClicked: if (noteId) root.deleteNote(noteId)
@@ -344,6 +380,7 @@ Item {
             if (isHovered) {
               collapseTimer.stop()
               root.hoveredId = noteId
+              root.hoveredIndex = index
               root.plusHovered = false
             } else if (root.hoveredId === noteId) {
               collapseTimer.restart()
@@ -359,6 +396,7 @@ Item {
         onTriggered: {
           if (root.editorOpen) return
           root.hoveredId = ""
+          root.hoveredIndex = -1
           root.plusHovered = false
         }
       }
@@ -382,8 +420,14 @@ Item {
 
     EditorCard {
       id: editorCard
-      width: root.cardWidth
-      height: root.cardHeight
+      maxWidth: {
+        var sw = (stage.screen && stage.screen.width > 0) ? stage.screen.width : 1600
+        return Math.max(root.cardWidth, Math.min(Style.space(720), Math.round(sw * 0.55)))
+      }
+      maxHeight: {
+        var sh = (stage.screen && stage.screen.height > 0) ? stage.screen.height : 1000
+        return Math.max(root.cardHeight, sh - Style.gapsOut * 4)
+      }
       anchors.centerIn: parent
       hang: 0
       onRight: true

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "tony.omatabs",
   "name": "Omatabs",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Tony Roslund",
   "license": "MIT",
   "description": "Omatabs — sticky notes that live as tabs on the screen edge. Hover to peek, click to edit.",

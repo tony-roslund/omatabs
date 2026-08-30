@@ -12,11 +12,30 @@ BorderSurface {
   property string fontFamily: Style.font.menuFamily
   property int hang: 0
   property bool onRight: true
+  property int maxWidth: Style.space(720)
+  property int maxHeight: Style.space(720)
+  property int minWidth: Style.space(300)
+  property int minHeight: Style.space(180)
 
   readonly property var swatch: NotesModel.colorFor(colorId)
   readonly property color paper: swatch.paper
   readonly property color ink: swatch.ink
   readonly property var paperBorder: Border.surfaceSpec("menu", "border", Util.alpha(swatch.ink, 0.18), 1)
+  readonly property int innerPad: Style.space(24)
+  readonly property int fittedWidth: {
+    var natural = Math.ceil(measureNatural.implicitWidth) + innerPad
+    var cap = Math.max(minWidth, maxWidth)
+    return Math.max(minWidth, Math.min(cap, Math.max(minWidth, natural)))
+  }
+  readonly property int innerWidth: Math.max(1, fittedWidth - innerPad)
+  readonly property int fittedHeight: {
+    var titleH = Math.max(Style.space(28), Math.ceil(titleField.implicitHeight))
+    var bodyH = Math.max(Style.space(72), Math.ceil(measureBody.implicitHeight) + Style.space(8))
+    var chromeH = Style.space(28)
+    var h = root.contentTopInset + titleH + Style.spacing.sm + bodyH + Style.spacing.sm + chromeH + root.contentBottomInset
+    var cap = Math.max(minHeight, maxHeight)
+    return Math.max(minHeight, Math.min(cap, h))
+  }
 
   signal saveRequested(string title, string body, string colorId)
   signal cancelRequested()
@@ -27,6 +46,8 @@ BorderSurface {
   borderSpec: paperBorder
   radius: Style.cornerRadius
   padding: Style.spacing.panelPadding
+  width: fittedWidth
+  height: fittedHeight
 
   function takeFocus() {
     titleField.forceActiveFocus()
@@ -35,6 +56,32 @@ BorderSurface {
   function setDraft(title, body) {
     titleField.text = title || ""
     bodyEdit.text = body || ""
+  }
+
+  Item {
+    x: -10000
+    y: -10000
+    width: 1
+    height: 1
+    clip: true
+    enabled: false
+
+    Text {
+      id: measureNatural
+      text: bodyEdit.text
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.body
+      wrapMode: Text.NoWrap
+    }
+
+    Text {
+      id: measureBody
+      width: root.innerWidth
+      text: bodyEdit.text.length ? bodyEdit.text : " "
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.body
+      wrapMode: Text.Wrap
+    }
   }
 
   Keys.onPressed: function(event) {

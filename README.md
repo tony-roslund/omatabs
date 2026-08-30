@@ -3,7 +3,7 @@
 Sticky notes that live as tabs on the edge of the Omarchy desktop.
 
 - `+` starts a new note.
-- Hover a tab to peek the rendered note. Click to edit the markdown.
+- Tabs are title-sized along the edge. Hover expands the note into a card. If the card would run off the screen, the body scrolls. Click to edit.
 - Enter saves. Shift+Enter starts a new line.
 - Body text is markdown: `**bold**`, `*italic*`, `` `code` ``, lists, and links.
 
@@ -34,15 +34,3 @@ New note from a keybind:
 ```lua
 o.bind("SUPER + N", "New Omatabs note", [[omarchy-shell shell toggle tony.omatabs '{}']])
 ```
-
-## Remove
-
-```bash
-omarchy plugin remove tony.omatabs
-```
-
-That disables the overlay and deletes the plugin checkout. Notes are left in `~/.local/state/omarchy/omatabs.json`; delete that file if you also want the saved tabs gone.
-
-## License
-
-MIT. No extra packages or privileged install steps.

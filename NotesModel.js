@@ -185,9 +185,21 @@ function packTabs(notes, available, opts) {
   if (plusY < 0) plusY = 0
 
   var n = Array.isArray(notes) ? notes.length : 0
+  var titleOnly = opts.titleOnly === true
+  var given = Array.isArray(opts.heights) ? opts.heights : null
   var heights = []
-  for (var i = 0; i < n; i++)
-    heights.push(tabHeightForNote(notes[i], fontPx, pad, minH, maxH))
+  for (var i = 0; i < n; i++) {
+    var h
+    if (given && isFinite(Number(given[i])))
+      h = Math.round(Number(given[i]))
+    else if (titleOnly)
+      h = tabHeightForTitle(displayTitle(notes[i]), fontPx, pad, minH, maxH)
+    else
+      h = tabHeightForNote(notes[i], fontPx, pad, minH, maxH)
+    if (h < minH) h = minH
+    if (h > maxH) h = maxH
+    heights.push(h)
+  }
 
   function layout(ov) {
     var items = []
