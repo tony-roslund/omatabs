@@ -70,3 +70,23 @@ const colored = ctx.parse(ctx.serialize({ edge: "right", notes: [ctx.newNote("X"
 assert(colored.notes[0].color === "lavender", "round-trips color")
 const written = ctx.parse(ctx.serialize({ edge: "right", notes: [] }))
 assert(written.seeded === true && written.notes.length === 0, "persisted empty deck stays unseeded")
+
+assert(ctx.maxBodyChars() === 8192, "body cap is 8192 characters")
+assert(ctx.maxNotes() === 64, "deck cap is 64 notes")
+assert(ctx.validId("omatabs-welcome"), "welcome id is valid")
+assert(!ctx.validId("a/b"), "ids cannot contain slashes")
+assert(!ctx.validId("x".repeat(65)), "ids cannot exceed 64 characters")
+assert(ctx.normalizeNote({ id: "ok", body: "x".repeat(9000) }).body.length === 8192, "bodies clamp to the cap")
+assert(ctx.parse("x".repeat(ctx.maxFileBytes() + 1)).notes.length === 0, "oversized payloads are rejected")
+assert(ctx.parse('{"notes":[{"id":"ok","title":"t","body":"<img src=\\"https://evil.example/x.png\\">![x](https://evil.example/x.png) [ok](https://example.com) [no](javascript:alert(1))"}]}').notes[0].body.indexOf("https://example.com") !== -1, "http links are kept")
+const sanitized = ctx.parse('{"notes":[{"id":"ok","title":"t","body":"<img src=\\"https://evil.example/x.png\\">![x](https://evil.example/x.png) [ok](https://example.com) [no](javascript:alert(1))"}]}').notes[0].body
+assert(sanitized.indexOf("<img") === -1, "raw HTML is stripped")
+assert(sanitized.indexOf("![x]") === -1, "markdown images are stripped")
+assert(sanitized.indexOf("javascript:") === -1, "javascript links are dropped")
+assert(ctx.parse('{"notes":[{"id":"bad/id","title":"t","body":"n"}]}').notes.length === 0, "slash ids are dropped")
+const manyNotes = []
+for (let i = 0; i < 80; i++) manyNotes.push(ctx.newNote("N" + i, "b"))
+assert(ctx.parse(JSON.stringify({ notes: manyNotes })).notes.length === 64, "parse truncates to max notes")
+assert(ctx.upsertNote(manyNotes.slice(0, 64), ctx.newNote("extra", "x")).length === 64, "upsert will not grow past the cap")
+const titleHtml = ctx.displayTitle({ title: "<b>Hi</b>", body: "" })
+assert(titleHtml.indexOf("<b>") !== -1 && titleHtml.length <= 24, "titles stay literal text and capped")

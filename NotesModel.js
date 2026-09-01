@@ -2,11 +2,102 @@ function maxTitleChars() {
   return 24
 }
 
+function maxBodyChars() {
+  return 8192
+}
+
+function maxIdChars() {
+  return 64
+}
+
+function maxNotes() {
+  return 64
+}
+
+function maxFileBytes() {
+  return 256 * 1024
+}
+
+function maxJsonDepth() {
+  return 6
+}
+
+function maxLinkChars() {
+  return 256
+}
+
 function clampTitle(title) {
   var t = String(title == null ? "" : title)
   var max = maxTitleChars()
   if (t.length > max) t = t.slice(0, max)
   return t
+}
+
+function clampBody(body) {
+  var t = String(body == null ? "" : body)
+  var max = maxBodyChars()
+  if (t.length > max) t = t.slice(0, max)
+  return t
+}
+
+function validId(id) {
+  var s = String(id == null ? "" : id)
+  if (!s || s.length > maxIdChars()) return false
+  for (var i = 0; i < s.length; i++) {
+    var c = s.charCodeAt(i)
+    if (c < 32 || c === 127 || c === 47 || c === 92) return false
+  }
+  return true
+}
+
+function jsonDepth(value, depth) {
+  var d = depth || 1
+  if (d > maxJsonDepth()) return false
+  if (value && typeof value === "object") {
+    if (Array.isArray(value)) {
+      var limit = Math.min(value.length, maxNotes())
+      for (var i = 0; i < limit; i++) {
+        if (!jsonDepth(value[i], d + 1)) return false
+      }
+      return true
+    }
+    var n = 0
+    for (var k in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, k)) continue
+      n += 1
+      if (n > 16) return false
+      if (!jsonDepth(value[k], d + 1)) return false
+    }
+  }
+  return true
+}
+
+function sanitizeLink(url) {
+  var href = String(url || "").trim()
+  if (href.charAt(0) === "<" && href.charAt(href.length - 1) === ">")
+    href = href.slice(1, -1)
+  if (!href || href.length > maxLinkChars()) return ""
+  if (/[\s<>]/.test(href)) return ""
+  if (!/^(https?|mailto):[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$/i.test(href)) return ""
+  return href
+}
+
+function sanitizeBody(body) {
+  var text = clampBody(body)
+  text = text.replace(/<(https?:\/\/[^>\s]+)>/gi, function(_, url) {
+    return sanitizeLink(url)
+  })
+  text = text.replace(/<[A-Za-z\/!?][^>]*>/g, "")
+  text = text.replace(/!\[([^\]]*)\](?:\([^)]*\))?/g, "")
+  text = text.replace(/\[([^\]]+)\]\(([^)]*)\)/g, function(_, label, url) {
+    var href = sanitizeLink(url)
+    return href ? ("[" + label + "](" + href + ")") : label
+  })
+  text = text.replace(/^\[([^\]]+)\]:\s*(\S+)/gm, function(_, ref, url) {
+    var href = sanitizeLink(url)
+    return href ? ("[" + ref + "]: " + href) : ""
+  })
+  return text
 }
 
 function emptyState() {
@@ -31,20 +122,28 @@ function seedState() {
 
 function parse(raw) {
   var state = emptyState()
-  if (!raw) return state
+  var source = String(raw == null ? "" : raw)
+  if (!source) return state
+  if (source.length > maxFileBytes()) return state
+  var data
   try {
-    var data = JSON.parse(String(raw))
+    data = JSON.parse(source)
   } catch (e) {
     return state
   }
-  if (!data || typeof data !== "object") return state
+  if (!data || typeof data !== "object" || Array.isArray(data)) return state
+  if (!jsonDepth(data)) return state
   if (data.edge === "left" || data.edge === "right") state.edge = data.edge
   if (data.seeded === true) state.seeded = true
   var notes = []
+  var seen = ({})
   var list = Array.isArray(data.notes) ? data.notes : []
   for (var i = 0; i < list.length; i++) {
     var note = normalizeNote(list[i])
-    if (note) notes.push(note)
+    if (!note || seen[note.id]) continue
+    seen[note.id] = true
+    notes.push(note)
+    if (notes.length >= maxNotes()) break
   }
   state.notes = notes
   return state
@@ -53,10 +152,14 @@ function parse(raw) {
 function serialize(state) {
   var edge = state && state.edge === "left" ? "left" : "right"
   var notes = []
+  var seen = ({})
   var list = state && Array.isArray(state.notes) ? state.notes : []
   for (var i = 0; i < list.length; i++) {
     var note = normalizeNote(list[i])
-    if (note) notes.push(note)
+    if (!note || seen[note.id]) continue
+    seen[note.id] = true
+    notes.push(note)
+    if (notes.length >= maxNotes()) break
   }
   return JSON.stringify({ version: 1, edge: edge, seeded: true, notes: notes }, null, 2) + "\n"
 }
@@ -64,9 +167,9 @@ function serialize(state) {
 function normalizeNote(value) {
   if (!value || typeof value !== "object") return null
   var id = String(value.id || "").trim()
-  if (!id) return null
+  if (!validId(id)) return null
   var title = clampTitle(value.title)
-  var body = String(value.body == null ? "" : value.body)
+  var body = sanitizeBody(value.body)
   var created = Number(value.created)
   var updated = Number(value.updated)
   if (!isFinite(created) || created <= 0) created = Date.now()
@@ -123,7 +226,7 @@ function newNote(title, body, colorId) {
   return {
     id: newId(),
     title: clampTitle(title),
-    body: String(body || ""),
+    body: sanitizeBody(body || ""),
     color: colorFor(colorId).id,
     created: now,
     updated: now
@@ -253,7 +356,10 @@ function upsertNote(notes, note) {
       next.push(list[i])
     }
   }
-  if (!found) next.push(normalized)
+  if (!found) {
+    if (next.length >= maxNotes()) return next
+    next.push(normalized)
+  }
   return next
 }
 

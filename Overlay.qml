@@ -45,7 +45,11 @@ Item {
   readonly property color paper: Color.menu.background
   readonly property color ink: Color.menu.text
   readonly property var paperBorder: Border.flat(Color.menu.border, Math.max(1, Style.space(1)))
-  readonly property string notesPath: Quickshell.env("HOME") + "/.local/state/omarchy/omatabs.json"
+  readonly property string pluginPath: root.manifest && root.manifest.__sourceDir ? String(root.manifest.__sourceDir) : ""
+  readonly property string stateHelper: root.pluginPath + "/libexec/omatabs-state"
+  readonly property int helperTimeoutMs: 5000
+  readonly property int helperKillMs: 500
+  property bool persistQueued: false
 
   function open(payloadJson) {
     root.startNew()
@@ -164,7 +168,15 @@ Item {
   }
 
   function persist() {
-    notesFile.setText(NotesModel.serialize({ edge: root.edge, notes: root.notes }))
+    if (saveProc.running || loadProc.running) {
+      root.persistQueued = true
+      return
+    }
+    root.persistQueued = false
+    saveProc.payload = NotesModel.serialize({ edge: root.edge, notes: root.notes })
+    saveProc.command = ["python3", root.stateHelper, "save"]
+    saveTimeout.restart()
+    saveProc.running = true
   }
 
   function loadState(raw) {
@@ -187,6 +199,7 @@ Item {
   Text {
     id: titleMeter
     visible: false
+    textFormat: Text.PlainText
     font.family: Style.font.menuFamily
     font.pixelSize: Style.font.body
     font.bold: true
@@ -228,24 +241,81 @@ Item {
   }
 
   Component.onCompleted: {
-    mkdirProc.running = true
+    loadProc.command = ["python3", root.stateHelper, "load"]
+    loadTimeout.restart()
+    loadProc.running = true
+  }
+
+  function stopHelper(proc, termTimer, killTimer) {
+    termTimer.stop()
+    if (!proc.running) {
+      killTimer.stop()
+      return
+    }
+    proc.signal(15)
+    killTimer.restart()
   }
 
   Process {
-    id: mkdirProc
-    command: ["bash", "-c", "mkdir -p \"$HOME/.local/state/omarchy\" && if [ ! -f \"$HOME/.local/state/omarchy/omatabs.json\" ] && [ -f \"$HOME/.local/state/omarchy/edge-notes.json\" ]; then cp \"$HOME/.local/state/omarchy/edge-notes.json\" \"$HOME/.local/state/omarchy/omatabs.json\"; fi"]
-    onExited: notesFile.reload()
+    id: loadProc
+    stdout: StdioCollector {
+      id: loadOut
+      waitForEnd: true
+    }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(exitCode) {
+      loadTimeout.stop()
+      loadKill.stop()
+      root.loadState(exitCode === 0 ? String(loadOut.text || "") : "")
+      if (root.persistQueued && !saveProc.running) root.persist()
+    }
   }
 
-  FileView {
-    id: notesFile
-    path: root.notesPath
-    watchChanges: true
-    atomicWrites: true
-    printErrors: false
-    onLoaded: root.loadState(text())
-    onLoadFailed: root.loadState("")
-    onFileChanged: reload()
+  Timer {
+    id: loadTimeout
+    interval: root.helperTimeoutMs
+    repeat: false
+    onTriggered: root.stopHelper(loadProc, loadTimeout, loadKill)
+  }
+
+  Timer {
+    id: loadKill
+    interval: root.helperKillMs
+    repeat: false
+    onTriggered: if (loadProc.running) loadProc.signal(9)
+  }
+
+  Process {
+    id: saveProc
+    property string payload: ""
+    stdinEnabled: true
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onStarted: saveProc.write(saveProc.payload)
+    onExited: function(exitCode) {
+      saveTimeout.stop()
+      saveKill.stop()
+      if (exitCode === 0 && saveProc.payload) {
+        var saved = NotesModel.parse(saveProc.payload)
+        if (saved.notes) root.setNotes(saved.notes)
+      }
+      saveProc.payload = ""
+      if (root.persistQueued) root.persist()
+    }
+  }
+
+  Timer {
+    id: saveTimeout
+    interval: root.helperTimeoutMs
+    repeat: false
+    onTriggered: root.stopHelper(saveProc, saveTimeout, saveKill)
+  }
+
+  Timer {
+    id: saveKill
+    interval: root.helperKillMs
+    repeat: false
+    onTriggered: if (saveProc.running) saveProc.signal(9)
   }
 
   IpcHandler {

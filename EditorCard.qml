@@ -69,6 +69,7 @@ BorderSurface {
     Text {
       id: measureNatural
       text: bodyEdit.text
+      textFormat: Text.PlainText
       font.family: root.fontFamily
       font.pixelSize: Style.font.body
       wrapMode: Text.NoWrap
@@ -78,6 +79,7 @@ BorderSurface {
       id: measureBody
       width: root.innerWidth
       text: bodyEdit.text.length ? bodyEdit.text : " "
+      textFormat: Text.PlainText
       font.family: root.fontFamily
       font.pixelSize: Style.font.body
       wrapMode: Text.Wrap
@@ -129,6 +131,7 @@ BorderSurface {
     anchors.bottomMargin: Style.spacing.sm
     wrapMode: TextArea.Wrap
     textFormat: TextEdit.PlainText
+    maximumLength: NotesModel.maxBodyChars()
     placeholderText: "Write in markdown"
     font.family: root.fontFamily
     font.pixelSize: Style.font.body

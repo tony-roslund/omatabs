@@ -1,0 +1,535 @@
+#!/usr/bin/env python3
+"""Bounded, symlink-safe state helper for Omatabs."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import secrets
+import signal
+import stat
+import sys
+import time
+
+
+class StateError(RuntimeError):
+    pass
+
+
+MAX_FILE_BYTES = 256 * 1024
+MAX_JSON_DEPTH = 6
+MAX_NOTES = 64
+MAX_ID_CHARS = 64
+MAX_TITLE_CHARS = 24
+MAX_BODY_CHARS = 8192
+MAX_LINK_CHARS = 256
+COPY_CHUNK_BYTES = 64 * 1024
+DEADLINE_SECONDS = 4
+STATE_NAME = "omatabs.json"
+LEGACY_NAME = "edge-notes.json"
+QUARANTINE_PREFIX = "omatabs.json.corrupt"
+ALLOWED_EDGES = {"left", "right"}
+ALLOWED_COLORS = {"yellow", "mint", "blue", "lavender", "peach", "rose"}
+TAG_RE = re.compile(r"<[A-Za-z/!?][^>]*>")
+IMAGE_RE = re.compile(r"!\[([^\]]*)\](?:\([^)]*\))?")
+INLINE_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]*)\)")
+REF_DEF_RE = re.compile(r"^\[([^\]]+)\]:\s*(\S+)", re.MULTILINE)
+AUTOLINK_RE = re.compile(r"<(https?://[^>\s]+)>", re.IGNORECASE)
+SAFE_LINK_RE = re.compile(r"^(https?|mailto):[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$", re.IGNORECASE)
+
+
+def _on_alarm(_signum, _frame):
+    try:
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+    except OSError:
+        os.kill(os.getpid(), signal.SIGKILL)
+
+
+def _arm_deadline():
+    try:
+        os.setpgrp()
+    except OSError:
+        pass
+    signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(DEADLINE_SECONDS)
+
+
+def _dir_flags():
+    return (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | os.O_CLOEXEC
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+def _file_flags(extra=0):
+    return (
+        extra
+        | os.O_CLOEXEC
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+
+
+def _is_private_owned(metadata):
+    return metadata.st_uid == os.getuid() and (metadata.st_mode & 0o022) == 0
+
+
+def _open_dir_component(dir_fd, name, create):
+    if name in (".", "..") or "/" in name or not name:
+        raise StateError("invalid path component")
+    flags = _dir_flags()
+    try:
+        fd = os.open(name, flags, dir_fd=dir_fd)
+    except FileNotFoundError:
+        if not create:
+            raise
+        os.mkdir(name, 0o700, dir_fd=dir_fd)
+        fd = os.open(name, flags, dir_fd=dir_fd)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise StateError("path component is not a directory")
+        if metadata.st_uid == os.getuid() and (metadata.st_mode & 0o022):
+            raise StateError("directory is not private")
+        if create and metadata.st_uid != os.getuid():
+            raise StateError("cannot create under an unowned directory")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _walk_abs(path, create=False):
+    if not path or not os.path.isabs(path):
+        raise StateError("path is not absolute")
+    parts = [part for part in path.split("/") if part]
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    seen_owned = False
+    try:
+        for part in parts:
+            nxt = _open_dir_component(fd, part, create=create and seen_owned)
+            metadata = os.fstat(nxt)
+            if metadata.st_uid == os.getuid():
+                seen_owned = True
+            elif seen_owned:
+                os.close(nxt)
+                raise StateError("unowned path component")
+            os.close(fd)
+            fd = nxt
+        if not seen_owned:
+            raise StateError("state path is not owned")
+        metadata = os.fstat(fd)
+        if not _is_private_owned(metadata):
+            raise StateError("state path is not a private owned directory")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _open_state_dir():
+    xdg = os.environ.get("XDG_STATE_HOME")
+    if xdg:
+        parent = _walk_abs(xdg, create=True)
+    else:
+        home = os.environ.get("HOME")
+        if not home or not os.path.isabs(home):
+            raise StateError("HOME is not an absolute path")
+        parent = _walk_abs(os.path.join(home, ".local", "state"), create=True)
+    try:
+        return _open_dir_component(parent, "omarchy", create=True)
+    finally:
+        os.close(parent)
+
+
+def _open_regular(dir_fd, name, extra=os.O_RDONLY):
+    if name in (".", "..") or "/" in name or not name:
+        raise StateError("invalid file name")
+    fd = os.open(name, _file_flags(extra), dir_fd=dir_fd)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise StateError("state path is not a regular file")
+        return fd, metadata
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise StateError("short write")
+        view = view[written:]
+
+
+def _atomic_replace(dir_fd, name, data):
+    if len(data) > MAX_FILE_BYTES:
+        raise StateError("payload exceeds the size limit")
+    tmp = f".{name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    fd = None
+    try:
+        fd = os.open(
+            tmp,
+            _file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL),
+            0o600,
+            dir_fd=dir_fd,
+        )
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise StateError("temporary file is not regular")
+        view = memoryview(data)
+        while view:
+            chunk = view[:COPY_CHUNK_BYTES]
+            _write_all(fd, chunk)
+            view = view[len(chunk) :]
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        tmp = None
+        dir_file = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=dir_fd)
+        try:
+            os.fsync(dir_file)
+        finally:
+            os.close(dir_file)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if tmp is not None:
+            try:
+                os.unlink(tmp, dir_fd=dir_fd)
+            except OSError:
+                pass
+
+
+def _quarantine(dir_fd, name):
+    stamp = f"{int(time.time())}.{os.getpid()}.{secrets.token_hex(4)}"
+    dest = f"{QUARANTINE_PREFIX}.{stamp}"
+    try:
+        os.replace(name, dest, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except OSError:
+        try:
+            os.unlink(name, dir_fd=dir_fd)
+        except OSError:
+            pass
+
+
+def _read_regular(dir_fd, name):
+    fd, metadata = _open_regular(dir_fd, name)
+    try:
+        if metadata.st_size > MAX_FILE_BYTES:
+            raise StateError("state file exceeds the size limit")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_FILE_BYTES:
+                raise StateError("state file exceeds the size limit")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _json_depth(value, depth=1):
+    if depth > MAX_JSON_DEPTH:
+        raise StateError("JSON nesting exceeds the limit")
+    if isinstance(value, dict):
+        if len(value) > 16:
+            raise StateError("JSON object is too large")
+        for item in value.values():
+            _json_depth(item, depth + 1)
+    elif isinstance(value, list):
+        for item in value[:MAX_NOTES]:
+            _json_depth(item, depth + 1)
+    elif isinstance(value, (str, int, float, bool)) or value is None:
+        return
+    else:
+        raise StateError("unsupported JSON value")
+
+
+def _valid_id(value):
+    text = str(value or "")
+    if not text or len(text) > MAX_ID_CHARS:
+        return False
+    for char in text:
+        code = ord(char)
+        if code < 32 or code == 127 or char in "/\\":
+            return False
+    return True
+
+
+def _sanitize_link(url):
+    href = str(url or "").strip()
+    if href.startswith("<") and href.endswith(">"):
+        href = href[1:-1]
+    if len(href) > MAX_LINK_CHARS or any(char.isspace() or char in "<>" for char in href):
+        return ""
+    if SAFE_LINK_RE.match(href):
+        return href
+    return ""
+
+
+def sanitize_body(body):
+    text = str(body if body is not None else "")
+    if len(text) > MAX_BODY_CHARS:
+        text = text[:MAX_BODY_CHARS]
+
+    def autolink(match):
+        href = _sanitize_link(match.group(1))
+        return href if href else ""
+
+    text = AUTOLINK_RE.sub(autolink, text)
+    text = TAG_RE.sub("", text)
+    text = IMAGE_RE.sub("", text)
+
+    def inline_link(match):
+        href = _sanitize_link(match.group(2))
+        label = match.group(1)
+        return f"[{label}]({href})" if href else label
+
+    text = INLINE_LINK_RE.sub(inline_link, text)
+
+    def ref_def(match):
+        href = _sanitize_link(match.group(2))
+        return f"[{match.group(1)}]: {href}" if href else ""
+
+    return REF_DEF_RE.sub(ref_def, text)
+
+
+def _clamp_title(title):
+    text = str(title if title is not None else "")
+    return text[:MAX_TITLE_CHARS]
+
+
+def empty_state():
+    return {"version": 1, "edge": "right", "seeded": False, "notes": []}
+
+
+def welcome_note():
+    now = int(time.time() * 1000)
+    return {
+        "id": "omatabs-welcome",
+        "title": "Omatabs",
+        "body": (
+            "Hover a tab to peek.\nClick to edit.\n\n"
+            "Enter saves. Shift+Enter is a new line.\n+ starts a new note.\n\n"
+            "Markdown works: **bold**, *italic*, `code`, and lists."
+        ),
+        "color": "yellow",
+        "created": now,
+        "updated": now,
+    }
+
+
+def seed_state():
+    return {"version": 1, "edge": "right", "seeded": True, "notes": [welcome_note()]}
+
+
+def normalize_note(value):
+    if not isinstance(value, dict) or not _valid_id(value.get("id")):
+        return None
+    created = value.get("created")
+    updated = value.get("updated")
+    try:
+        created_n = int(created)
+    except (TypeError, ValueError):
+        created_n = 0
+    try:
+        updated_n = int(updated)
+    except (TypeError, ValueError):
+        updated_n = 0
+    now = int(time.time() * 1000)
+    if created_n <= 0:
+        created_n = now
+    if updated_n <= 0:
+        updated_n = created_n
+    color = str(value.get("color") or "")
+    if color not in ALLOWED_COLORS:
+        color = "yellow"
+    return {
+        "id": str(value["id"]),
+        "title": _clamp_title(value.get("title")),
+        "body": sanitize_body(value.get("body")),
+        "color": color,
+        "created": created_n,
+        "updated": updated_n,
+    }
+
+
+def parse_state(raw):
+    if not raw:
+        return empty_state()
+    if len(raw) > MAX_FILE_BYTES:
+        raise StateError("state file exceeds the size limit")
+    try:
+        data = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise StateError("state file is not valid JSON") from error
+    _json_depth(data)
+    if not isinstance(data, dict):
+        raise StateError("state root is not an object")
+    state = empty_state()
+    if data.get("edge") in ALLOWED_EDGES:
+        state["edge"] = data["edge"]
+    if data.get("seeded") is True:
+        state["seeded"] = True
+    notes = []
+    seen = set()
+    items = data.get("notes") if isinstance(data.get("notes"), list) else []
+    for item in items:
+        note = normalize_note(item)
+        if not note or note["id"] in seen:
+            continue
+        seen.add(note["id"])
+        notes.append(note)
+        if len(notes) >= MAX_NOTES:
+            break
+    state["notes"] = notes
+    encoded = serialize_state(state)
+    if len(encoded.encode("utf-8")) > MAX_FILE_BYTES:
+        raise StateError("normalized state exceeds the size limit")
+    return state
+
+
+def serialize_state(state):
+    edge = state.get("edge") if isinstance(state, dict) else "right"
+    if edge not in ALLOWED_EDGES:
+        edge = "right"
+    notes = []
+    items = state.get("notes") if isinstance(state, dict) and isinstance(state.get("notes"), list) else []
+    seen = set()
+    for item in items:
+        note = normalize_note(item)
+        if not note or note["id"] in seen:
+            continue
+        seen.add(note["id"])
+        notes.append(note)
+        if len(notes) >= MAX_NOTES:
+            break
+    payload = {"version": 1, "edge": edge, "seeded": True, "notes": notes}
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def _copy_legacy(dir_fd):
+    try:
+        payload = _read_regular(dir_fd, LEGACY_NAME)
+    except (OSError, StateError):
+        return False
+    try:
+        state = parse_state(payload)
+    except StateError:
+        _quarantine(dir_fd, LEGACY_NAME)
+        return False
+    if not state["seeded"] and not state["notes"]:
+        state = seed_state()
+    _atomic_replace(dir_fd, STATE_NAME, serialize_state(state).encode("utf-8"))
+    return True
+
+
+def load_state():
+    dir_fd = _open_state_dir()
+    try:
+        try:
+            payload = _read_regular(dir_fd, STATE_NAME)
+        except FileNotFoundError:
+            if _copy_legacy(dir_fd):
+                payload = _read_regular(dir_fd, STATE_NAME)
+            else:
+                return seed_state()
+        except (StateError, OSError):
+            _quarantine(dir_fd, STATE_NAME)
+            return empty_state()
+        try:
+            state = parse_state(payload)
+        except StateError:
+            _quarantine(dir_fd, STATE_NAME)
+            return empty_state()
+        if not state["seeded"] and not state["notes"]:
+            state = seed_state()
+            _atomic_replace(dir_fd, STATE_NAME, serialize_state(state).encode("utf-8"))
+        return state
+    finally:
+        os.close(dir_fd)
+
+
+def _read_stdin():
+    chunks = []
+    total = 0
+    decoded = ""
+    decoder = json.JSONDecoder()
+    while True:
+        chunk = os.read(0, COPY_CHUNK_BYTES)
+        if chunk:
+            total += len(chunk)
+            if total > MAX_FILE_BYTES:
+                raise StateError("stdin exceeds the size limit")
+            chunks.append(chunk)
+        blob = b"".join(chunks)
+        try:
+            decoded = blob.decode("utf-8")
+        except UnicodeDecodeError as error:
+            if chunk:
+                continue
+            raise StateError("stdin is not UTF-8") from error
+        stripped = decoded.lstrip()
+        if stripped:
+            try:
+                value, _end = decoder.raw_decode(stripped)
+                return value
+            except json.JSONDecodeError:
+                if not chunk:
+                    raise StateError("stdin is not valid JSON")
+        elif not chunk:
+            raise StateError("stdin is empty")
+        if not chunk:
+            raise StateError("stdin is not valid JSON")
+
+
+def save_state():
+    incoming = _read_stdin()
+    _json_depth(incoming)
+    if not isinstance(incoming, dict):
+        raise StateError("save payload is not an object")
+    state = parse_state(json.dumps(incoming).encode("utf-8"))
+    encoded = serialize_state(state).encode("utf-8")
+    dir_fd = _open_state_dir()
+    try:
+        _atomic_replace(dir_fd, STATE_NAME, encoded)
+    finally:
+        os.close(dir_fd)
+    sys.stdout.write(encoded.decode("utf-8"))
+    sys.stdout.flush()
+
+
+def main(argv):
+    _arm_deadline()
+    if len(argv) != 2 or argv[1] not in {"load", "save"}:
+        print("usage: omatabs-state load|save", file=sys.stderr)
+        return 2
+    try:
+        if argv[1] == "load":
+            sys.stdout.write(serialize_state(load_state()))
+            sys.stdout.flush()
+        else:
+            save_state()
+        return 0
+    except StateError as error:
+        print(f"omatabs-state: {error}", file=sys.stderr)
+        return 1
+    except OSError as error:
+        print(f"omatabs-state: {error.strerror}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

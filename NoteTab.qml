@@ -110,7 +110,7 @@ Item {
 
     Text {
       id: measureNatural
-      text: NotesModel.markdownForDisplay(root.body)
+      text: NotesModel.markdownForDisplay(NotesModel.sanitizeBody(root.body))
       textFormat: Text.MarkdownText
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
@@ -121,6 +121,7 @@ Item {
       id: measureTitle
       width: root.innerPeekWidth
       text: root.title
+      textFormat: Text.PlainText
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
       font.bold: true
@@ -131,7 +132,7 @@ Item {
     Text {
       id: measureBody
       width: root.innerPeekWidth
-      text: NotesModel.markdownForDisplay(root.body)
+      text: NotesModel.markdownForDisplay(NotesModel.sanitizeBody(root.body))
       textFormat: Text.MarkdownText
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
@@ -173,6 +174,7 @@ Item {
         anchors.centerIn: parent
         rotation: root.onRight ? -90 : 90
         text: root.title
+        textFormat: Text.PlainText
         color: root.ink
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
@@ -202,6 +204,7 @@ Item {
       anchors.left: parent.left
       anchors.right: parent.right
       text: root.title
+      textFormat: Text.PlainText
       color: root.ink
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
@@ -233,7 +236,7 @@ Item {
       Text {
         id: peekBodyText
         width: peekScroll.width
-        text: NotesModel.markdownForDisplay(root.body)
+        text: NotesModel.markdownForDisplay(NotesModel.sanitizeBody(root.body))
         textFormat: Text.MarkdownText
         color: Util.alpha(root.ink, 0.82)
         linkColor: root.ink
