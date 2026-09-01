@@ -131,7 +131,6 @@ BorderSurface {
     anchors.bottomMargin: Style.spacing.sm
     wrapMode: TextArea.Wrap
     textFormat: TextEdit.PlainText
-    maximumLength: NotesModel.maxBodyChars()
     placeholderText: "Write in markdown"
     font.family: root.fontFamily
     font.pixelSize: Style.font.body
@@ -142,6 +141,13 @@ BorderSurface {
     selectByMouse: true
     persistentSelection: true
     background: Item {}
+    onTextChanged: {
+      var max = NotesModel.maxBodyChars()
+      if (text.length <= max) return
+      var pos = cursorPosition
+      text = text.substring(0, max)
+      cursorPosition = Math.min(pos, max)
+    }
     Keys.priority: Keys.BeforeItem
     Keys.onPressed: function(event) {
       if (event.key === Qt.Key_Escape) {
